@@ -12,8 +12,8 @@
 #define MAXGRID 402     /* maximum grid size (real points plus edges) */
 #define COORDINATOR 0   /* process number of the Coordinator */
 
-static void Coordinator(int,int,int);
-static void Worker(int,int,int,int,int);
+static void Coordinator(int,int,int,double);
+static void Worker(int,int,int,int,double);
 
 
 
@@ -23,7 +23,7 @@ int main(int argc, char *argv[]) {
   int myid;
   int numWorkers, gridSize;  /* assume gridSize is multiple of numWorkers */
   int stripSize;             /* gridSize/numWorkers             */
-  int numIters;              /* number of iterations to execute */
+  //int numIters;              /* number of iterations to execute */
   double epsilon;
 
   MPI_Init(&argc, &argv);
@@ -64,10 +64,10 @@ int main(int argc, char *argv[]) {
      become one of the workers or the coordinator, depending on my id */
   if (myid == 0) {
     printf("1 Coordinator and %d Workers\n", numWorkers);
-    printf("  gridSize:  %d\n  stripSize:  %d\n  numIters:  %d\n",gridSize, stripSize, numIters);
-    Coordinator(numWorkers, stripSize, gridSize);
+    printf("  gridSize:  %d\n  stripSize:  %d\n  epsilon:  %f\n",gridSize, stripSize, epsilon);
+    Coordinator(numWorkers, stripSize, gridSize, epsilon);
   } else {
-    Worker(myid, numWorkers, stripSize, gridSize, numIters);
+    Worker(myid, numWorkers, stripSize, gridSize, epsilon);
   }
 
   MPI_Finalize();  /* clean up MPI */
@@ -75,7 +75,7 @@ int main(int argc, char *argv[]) {
 
 
 /* gather and print results from Workers */
-static void Coordinator(int numWorkers, int stripSize, int gridSize) {
+static void Coordinator(int numWorkers, int stripSize, int gridSize, double epsilon) {
 
   double grid[MAXGRID][MAXGRID];  // place to hold the results I get from the workers
   int i, j, startrow, endrow;
@@ -83,6 +83,10 @@ static void Coordinator(int numWorkers, int stripSize, int gridSize) {
   MPI_Status status;
   FILE *results;  // write the results to a file for viewing and debugging
   double mydiff = 0.0, maxdiff = 0.0;
+  maxdiff = epsilon + 1;
+  while (maxdiff > epsilon) {
+    MPI_Allreduce(&mydiff, &maxdiff, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+  }
   
   for (workerid = 1; workerid <= numWorkers; workerid++) {
     startrow = (workerid-1)*stripSize + 1;
@@ -94,7 +98,6 @@ static void Coordinator(int numWorkers, int stripSize, int gridSize) {
     printf("got results from worker %d\n", workerid);
   }
   // each work computes their maxdii and sends it to the coordinator to reduce
-  MPI_Reduce(&mydiff, &maxdiff, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
   printf("global maxdiff is %f\n", maxdiff);
 
   /* output the results to file "results" */
@@ -120,7 +123,7 @@ static void Coordinator(int numWorkers, int stripSize, int gridSize) {
  */
 
 static void Worker(int myid, int numWorkers, int stripSize,
-                   int gridSize, int numIters) {
+                   int gridSize, double epsilon) {
   /* the worker really only needs arrays of strip size + 2 not MAXGRID
      but since this dumb sample program does static allocation there is no way to know from 
      the command line parameter what strip size will end up being so it just wastes alot of space
@@ -132,6 +135,7 @@ static void Worker(int myid, int numWorkers, int stripSize,
   int left = 0, right = 0;    /* neighboring strips above and below */
   MPI_Status status;
   double mydiff = 0.0, maxdiff, temp;
+  double diff;
 
   /* Your program should read the grid in from a file not just cram static values in like this 
      wimpy sample program 
@@ -175,9 +179,9 @@ static void Worker(int myid, int numWorkers, int stripSize,
 
   printf("Worker %d initialized; left is worker %d and right is worker %d\n", 
       myid, left, right);
-
+  maxdiff = epsilon + 1;
   /* do the actual computation */
-  for (iters = 1; iters <= numIters; iters++) {
+  while (maxdiff > epsilon) {
     /* exchange my boundaries with my neighbors, in a ring */
     if (right != 0)
         MPI_Send(&grid[next][stripSize][1], gridSize, MPI_DOUBLE, right, 0,
@@ -193,12 +197,21 @@ static void Worker(int myid, int numWorkers, int stripSize,
                     MPI_COMM_WORLD, &status);
 
     /* update my points */
+    mydiff = 0;
     for (i = 1; i <= stripSize; i++) {
       for (j = 1; j <= gridSize; j++) {
         grid[next][i][j] = (grid[current][i-1][j] + grid[current][i+1][j] +
                grid[current][i][j-1] + grid[current][i][j+1]) / 4;
+        diff = grid[next][i][j] - grid[current][i][j];
+        if (diff < 0) {
+          diff = - diff;
+        }
+        if (diff > mydiff) {
+          mydiff = diff;
+        }
       }
     }
+    MPI_Allreduce(&mydiff, &maxdiff, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
 
     /* swap roles of grids */
     current = next;  next = 1-next;
@@ -210,14 +223,7 @@ static void Worker(int myid, int numWorkers, int stripSize,
             COORDINATOR, 0, MPI_COMM_WORLD);
   }
 
-  /* compute maximum difference and reduce it with Coordinator */
-  for (i = 1; i <= stripSize; i++)
-    for (j = 1; j <= gridSize; j++) {
-      temp = fabs(grid[next][i][j] - grid[current][i][j]);
-      if (temp > mydiff)
-        mydiff = temp;
-    }
-  MPI_Reduce(&mydiff, &maxdiff, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+  
   printf("maxdiff of worker %d is %f\n", myid, mydiff);
 
 }
