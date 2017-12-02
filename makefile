@@ -1,7 +1,7 @@
 # Environment
 # "development": build with debugging symbols and minimal optimization
 # "production": build without debugging symbols and maximum optimization
-environment ?= development
+#environment ?= development
 
 # Source files directory
 SRCDIR := src
@@ -26,7 +26,7 @@ vpath %.h $(INCDIR)
 # Compiler
 CC = gcc
 # Compiler flags
-CFLAGS := -c -pedantic -std=c99 -D_GNU_SOURCE -m64 $(addprefix -I, $(INCDIR))
+CFLAGS := -fopenmp -c -pedantic -std=gnu11 -m64 $(addprefix -I, $(INCDIR))
 # Environment specific compiler flags
 ifeq ($(environment), development)
 	CFLAGS += -Wall
@@ -45,14 +45,14 @@ else
 	CFLAGS += -flto
 	CFLAGS += -Ofast
 	CFLAGS += -march=core-avx-i
-	CFLAGS += -fopt-info-all=optimizations.opt
+	CFLAGS += -fopt-info-vec=optimizations.opt
 endif
 # Output option flags
 OUTPUT_OPTION = -MMD -MP -o $@
 
 LD = $(CC)
 # Linker flags
-LDFLAGS := -m64 -pthread
+LDFLAGS := -m64 -fopenmp 
 # Environment specific linker flags
 ifeq ($(environment), development)
 	LDFLAGS += -ggdb3
@@ -62,7 +62,7 @@ else
 	LDFLAGS += -march=core-avx-i
 endif
 # Libraries
-LIBS =
+LIBS = m
 # Linker libraries
 LDLIBS := $(addprefix -l, $(LIBS))
 

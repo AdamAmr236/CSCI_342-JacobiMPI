@@ -88,6 +88,12 @@ unsigned long GetNumWorkers(const char *nptr)
     exit(EXIT_FAILURE);
   }
 
+  if (result > MAXWORKERS)
+  {
+    fprintf(stderr, "Thread count cannot be greater than %d.\n", MAXWORKERS);
+    exit(EXIT_FAILURE);
+  }
+
   return result;
 }
 

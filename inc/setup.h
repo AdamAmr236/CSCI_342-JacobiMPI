@@ -3,4 +3,6 @@
 
 void InitializeGrids(void);
 
+void CalculateSlices(void);
+
 #endif

@@ -1,13 +1,17 @@
 /**
- * Jacobi iteration using pthreads
+ * Jacobi iteration using openMP
  */
 
 #include <float.h>
-#include <pthread.h>
+#include <math.h>
 #include <semaphore.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
 #include <sys/times.h>
+#include <time.h>
+#include <omp.h>
 
 #include "barrier.h"
 #include "input.h"
@@ -15,28 +19,47 @@
 #include "output.h"
 #include "setup.h"
 #include "worker.h"
-
-size_t x;
-size_t y;
-size_t xm1;
-size_t ym1;
-size_t stripSize;
+size_t x, y, xm1, ym1;
+size_t firstY[MAXWORKERS];
+size_t lastY[MAXWORKERS];
 size_t numWorkers;
-unsigned int numIters;
+unsigned numIters;
 double epsilon;
 double maxDiff[MAXWORKERS];
-double *grid1;
-double *grid2;
+double * restrict grid1 __attribute__ ((aligned (16)));
+double * restrict grid2 __attribute__ ((aligned (16)));
+int squaresize;
+struct List *squareLists;
+
+
+void setupSquareSlices(void);
+
+/* used for timing */
+struct timespec clockStart, clockFinish;
+
+struct timespec diff(struct timespec *startTime, struct timespec *endTime)
+{
+  struct timespec temp;
+  if ((endTime->tv_nsec-startTime->tv_nsec)<0) {
+    temp.tv_sec = endTime->tv_sec - startTime->tv_sec-1;
+    temp.tv_nsec = 1000000000 + endTime->tv_nsec - startTime->tv_nsec;
+  } else {
+    temp.tv_sec = endTime->tv_sec - startTime->tv_sec;
+    temp.tv_nsec = endTime->tv_nsec - startTime->tv_nsec;
+  }
+  return temp;
+}
 
 int main(int argc, char *argv[])
 {
-  pthread_t workerid[MAXWORKERS];
-  pthread_attr_t attr;
+  void *memptr __attribute__ ((aligned (16)));
+  int status;
   struct tms buffer;
   clock_t start, finish;
   size_t i;
-  long threadId;
+  uint64_t cyclesHighStart, cyclesLowStart, cyclesHighEnd, cyclesLowEnd, nstart, nfinish;
   double globalMaxDiff;
+
 
   if (argc != 5)
   {
@@ -53,18 +76,47 @@ int main(int argc, char *argv[])
 
   xm1 = x - 1;
   ym1 = y - 1;
-  stripSize = ym1 / numWorkers;
   numIters = 0;
   globalMaxDiff = DBL_MIN;
-  grid1 = (double *) malloc(x * y * sizeof(double));
-  grid2 = (double *) malloc(x * y * sizeof(double));
+
+  int alignment = 16;
+
+  status = posix_memalign(&memptr, alignment, x * y * sizeof(double));
+
+  if (status != 0)
+  {
+    fprintf(stderr, "%s\n", strerror(status));
+    exit(EXIT_FAILURE);
+  }
+  else
+  {
+    grid1 = (double *) __builtin_assume_aligned(memptr, alignment);
+    //grid1 = calloc(x * y, sizeof(double));
+  }
+
+  status = posix_memalign(&memptr, alignment, x * y * sizeof(double));
+
+  if (status != 0)
+  {
+    fprintf(stderr, "%s\n", strerror(status));
+    exit(EXIT_FAILURE);
+  }
+  else
+  {
+    grid2 = (double *) __builtin_assume_aligned(memptr, alignment);
+    //grid2 = calloc(x * y, sizeof(double));
+  }
 
   InitializeGrids();
+  CalculateSlices();
 
-  pthread_attr_init(&attr);
-  pthread_attr_setscope(&attr, PTHREAD_SCOPE_SYSTEM);
-  pthread_mutex_init(&barrier, NULL);
-  pthread_cond_init(&go, NULL);
+  clock_gettime(CLOCK_REALTIME, &clockStart);
+
+  asm volatile (
+      "RDTSC\n\t"
+      "movq %%rdx, %0\n\t"
+      "movq %%rax, %1\n\t": "=r" (cyclesHighStart), "=r" (cyclesLowStart)::
+    "%rax", "%rbx", "%rcx", "%rdx");
 
   start = times(&buffer);
 
@@ -72,33 +124,51 @@ int main(int argc, char *argv[])
   printf("Creating worker threads...\n");
 #endif
 
+  omp_set_num_threads(numWorkers);
+  #pragma omp parallel for
   for (i = 0; i < numWorkers; i++)
   {
-    threadId = i;
-    pthread_create(&workerid[i], &attr, Worker, (void *) threadId);
+    Worker(i);
   }
 
 #ifdef _DEBUG
   printf("Waiting for all worker threads to finish...\n");
 #endif
 
-  for (i = 0; i < numWorkers; i++)
-  {
-    pthread_join(workerid[i], NULL);
-  }
+clock_gettime(CLOCK_REALTIME, &clockFinish);
+
+asm volatile (
+    "RDTSC\n\t"
+    "movq %%rdx, %0\n\t"
+    "movq %%rax, %1\n\t": "=r" (cyclesHighEnd), "=r" (cyclesLowEnd)::
+  "%rax", "%rbx", "%rcx", "%rdx");
+
+  nstart = (((uint64_t) cyclesHighStart << 32) | cyclesLowStart);
+  nfinish = (((uint64_t) cyclesHighEnd << 32) | cyclesLowEnd);
 
   finish = times(&buffer);
 
   for (i = 0; i < numWorkers; i++)
   {
-    globalMaxDiff = (maxDiff[i] > globalMaxDiff) ? maxDiff[i] : globalMaxDiff;
+    globalMaxDiff = fmax(globalMaxDiff, maxDiff[i]);
   }
 
-  printf("number of iterations:  %d\nmaximum difference:  %e\n", numIters, globalMaxDiff);
-  printf("start:  %ld   finish:  %ld\n", start, finish);
-  printf("elapsed time:  %ld\n", finish - start);
+  // printf("number of iterations:  %d\nmaximum difference:  %e\n", numIters, globalMaxDiff);
+  // printf("start:  %ld   finish:  %ld\n", start, finish);
+  // printf("elapsed time:  %ld\n", finish - start);
+  printf("start:  %llu   end:  %llu\n", (long long unsigned) nstart, (long long unsigned) nfinish);
+  printf("number of cycles:  %llu\n", (long long unsigned) (nfinish - nstart));
 
-  WriteResults();
+  /* get difference */
+  struct timespec clockTime = diff(&clockStart, &clockFinish);
+  printf("wall clock time: %ld.%ld\n", clockTime.tv_sec, clockTime.tv_nsec);
+  printf("\n");
+
+  //printf("Middle of array:  %f\n", grid1[idx(x, 500, 500)]);
+
+  //results = fopen("results", "w");
+
+  //WriteResults(stdout);
 
   exit(EXIT_SUCCESS);
 }
