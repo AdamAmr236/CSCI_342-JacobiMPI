@@ -1,6 +1,6 @@
 #ifndef JACOBI_OUTPUT
 #define JACOBI_OUTPUT
 
-void WriteResults(void);
+void WriteResults(FILE *results);
 
 #endif
