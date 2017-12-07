@@ -3,32 +3,36 @@
   usage ()
 
     mpicc -o jacobimpi jacobimpi.c
-    mpirun -np <numWorkers+1> jacobimpi  -- <gridSize> <iters>   */
+    mpirun -np <numWorkers+1> jacobimpi  -- <gridSize> <epsilon>   */
 
 #include <stdlib.h>
 #include <mpi.h>
 #include <stdio.h>
 #include <math.h>
 #include <omp.h>
-#include <float.h>
+#include <assert.h>
+#include <string.h>
+#include <mcheck.h>
 #define MAXGRID 402     /* maximum grid size (real points plus edges) */
 #define COORDINATOR 0   /* process number of the Coordinator */
-#define MAXTHREADS 4
+#define MAXTHREADS 8
+
+#define idx(x, i, j) ((x) * (i) + (j))
 
 static void Coordinator(int,int,int,double);
-static void Worker(int,int,int,int,double, double***);
+static void Worker(int,int,int,int,double);
 
 double threadDiff[MAXTHREADS];
 double globalMaxDiff;
-
-
-
-/* main() -- initialize MPI, then become one of the worker or a coordinator  depending on your rank */
+double * restrict grid1 __attribute__ ((aligned (16)));
+double * restrict grid2 __attribute__ ((aligned (16)));
 
 int main(int argc, char *argv[]) {
+  void *memptr __attribute__ ((aligned (16)));
   int mpiId, len;
   int numWorkers, gridSize;  /* assume gridSize is multiple of numWorkers */
   int stripSize;             /* gridSize/numWorkers             */
+  int i, j;
   double epsilon;
   char hostname[MPI_MAX_PROCESSOR_NAME];
 
@@ -41,31 +45,39 @@ int main(int argc, char *argv[]) {
 
   /* get command-line arguments and do a simple error check */
   gridSize = atoi(argv[1]);
-  //numIters = atoi(argv[2]);
+  size_t x = gridSize + 2;
   epsilon = atof(argv[2]);
   stripSize = gridSize/numWorkers;
 
-  int i, j;
-  double ***grid = (double***)malloc(sizeof(double**)*2);
-  for (i = 0; i < 2; i++){
-    grid[i] = (double **) malloc(sizeof(double*)*(stripSize+2));
-    for (j = 0; j <= gridSize + 1; j++){
-      grid[i][j] = (double *) malloc(sizeof(double)*(gridSize+2));
+  int n;
+  if (mpiId != COORDINATOR){
+    n = posix_memalign(&memptr, 16, (x) * (stripSize+2) * sizeof(double));
+    if (n != 0){
+      fprintf(stderr, "%s\n", strerror(n));
+      exit(EXIT_FAILURE);
+    }else{
+      grid1 = (double*) __builtin_assume_aligned(memptr, 16);
+    }
+
+    n = posix_memalign(&memptr, 16, (x) * (stripSize+2) * sizeof(double) + 2);
+    if (n != 0){
+      fprintf(stderr, "%s\n", strerror(n));
+      exit(EXIT_FAILURE);
+    }else{
+      grid2 = (double*) __builtin_assume_aligned(memptr, 16);
+    }
+  }else{
+    n = posix_memalign(&memptr, 16, gridSize * gridSize * sizeof(double) + 2);
+    if (n != 0){
+      fprintf(stderr, "%s\n", strerror(n));
+      exit(EXIT_FAILURE);
+    }else{
+      grid1 = (double*) __builtin_assume_aligned(memptr, 16);
     }
   }
 
-  if (gridSize > (MAXGRID - 2) )
-    {
-      // printf("Dumb sample program cannot handle a gridsize bigger than %d \n",MAXGRID);
-      // printf("Program does fixed size allocation to hold grid. \n");
-      exit(1);
-    }
-
   if (numWorkers < 2) {
-    // printf("Got to have at least two workers to have any fun.\n");
-    // printf("If there ended up beingonly one worker the dumb thing would still try to exchange \n");
-    // printf("messages with it's \"neighbors\" after each cycle\n");
-    // printf("Also serves as a crude check that we don't divide by zero computing the strip size. \n");
+    printf("Must have at least two workers\n");
     exit(1);
   }
 
@@ -81,52 +93,51 @@ int main(int argc, char *argv[]) {
   /* Note it is an SPMD model so all the processes did the same thing up to this point now
      become one of the workers or the coordinator, depending on my id */
 
-  int current = 0, next = 1;
-  for (i = 0; i <= stripSize+1; i++)
-   for (j = 0; j <= gridSize+1; j++) {
-     grid[current][i][j] = 0.0;
-     grid[next][i][j] = 0.0;
-   }
-  for (i = 0; i <= stripSize+1; i++) {
-   grid[current][i][0] = 1.0;
-   grid[current][i][gridSize+1] = 1.0;
-   grid[next][i][0] = 1.0;
-   grid[next][i][gridSize+1] = 1.0;
-  }
-  if (mpiId == 1)
-   for (j = 0; j <= gridSize+1; j++) {
-     grid[current][0][j] = 1.0;
-     grid[next][0][j] = 1.0;
-   }
-  if (mpiId == numWorkers)
-   for (j = 0; j <= gridSize+1; j++) {
-     grid[current][stripSize+1][j] = 1.0;
-     grid[next][stripSize+1][j] = 1.0;
+  if (mpiId != COORDINATOR){
+    int current = 0, next = 1;
+    for (i = 0; i <= stripSize+1; i++)
+     for (j = 0; j <= gridSize+1; j++) {
+       grid1[idx(x, i, j)] = 0.0;
+       grid2[idx(x, i, j)] = 0.0;
+     }
+    for (i = 0; i <= stripSize+1; i++) {
+     grid1[idx(x, i, 0)] = 1.0;
+     grid1[idx(x, i, gridSize+1)] = 1.0;
+     grid2[idx(x, i, 0)] = 1.0;
+     grid2[idx(x, i, gridSize+1)] = 1.0;
+    }
+    if (mpiId == 1)
+     for (j = 0; j <= gridSize+1; j++) {
+       grid1[idx(x, 0, j)] = 1.0;
+       grid2[idx(x, 0, j)] = 1.0;
+     }
+    if (mpiId == numWorkers)
+     for (j = 0; j <= gridSize+1; j++) {
+       grid1[idx(x, stripSize + 1, j)] = 1.0;
+       grid2[idx(x, stripSize + 1, j)] = 1.0;
+     }
    }
 
 
   omp_set_num_threads(numWorkers);
-  if (mpiId == 0) {
+  if (mpiId == COORDINATOR) {
     printf("1 Coordinator and %d Workers\n", numWorkers);
     printf("  gridSize:  %d\n  stripSize:  %d\n  epsilon:  %f\n",gridSize, stripSize, epsilon);
     Coordinator(numWorkers, stripSize, gridSize, epsilon);
   } else {
     #pragma omp parallel for
     for (int threadId = 0; threadId < numWorkers; threadId++) {
-      Worker(mpiId, numWorkers, stripSize, gridSize, epsilon, grid);
+      Worker(mpiId, numWorkers, stripSize, gridSize, epsilon);
     }
   }
+  printf("BACK TO MAIN\n");
+  MPI_Barrier(MPI_COMM_WORLD);
+  printf("Worker %d freeing Grids\n", mpiId);
 
-  printf("BACK TO THE MAIN SHIT\n");
-
-
-  for (i = 0; i < 2; i++){
-    for (j = 0; j <= gridSize + 1; j++){
-      free(grid[i][j]);
-    }
-    free(grid[i]);
-  }
-  free(grid);
+  free(grid1);
+  if (mpiId != COORDINATOR)
+    free(grid2);
+  printf("\n\tWorker %d Freed \n\n", mpiId);
   MPI_Finalize();  /* clean up MPI */
 }
 
@@ -134,35 +145,46 @@ int main(int argc, char *argv[]) {
 /* gather and print results from Workers */
 static void Coordinator(int numWorkers, int stripSize, int gridSize, double epsilon) {
 
-  double grid[MAXGRID][MAXGRID];  // place to hold the results I get from the workers
+  // void *memptr __attribute__ ((aligned (16)));
+  // double * restrict grid __attribute__ ((aligned (16))); // place to hold the results I get from the workers
   int i, j, startrow, endrow;
   int workerid;
   MPI_Status status;
   FILE *results;  // write the results to a file for viewing and debugging
   double compDiff = 0.0;
   double maxdiff = epsilon + 1;
+  int x = gridSize;
+
+  // int n = posix_memalign(&memptr, 16, gridSize * gridSize * sizeof(double) + 2);
+  // if (n != 0){
+  //   fprintf(stderr, "%s\n", strerror(n));
+  //   exit(EXIT_FAILURE);
+  // }else{
+  //   grid = (double*) __builtin_assume_aligned(memptr, 16);
+  // }
+
   while (maxdiff > epsilon) {
     MPI_Allreduce(&compDiff, &maxdiff, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    printf("\tCoordinator maxdiff: %f\n", maxdiff);
+    // printf("\tCoordinator maxdiff: %f\n", maxdiff);
   }
 
   for (workerid = 1; workerid <= numWorkers; workerid++) {
     startrow = (workerid-1)*stripSize + 1;
     endrow = startrow + stripSize - 1;
     for (i = startrow; i <= endrow; i++) {
-        MPI_Recv(&grid[i][1], gridSize, MPI_DOUBLE, workerid, 0,
+        MPI_Recv(&grid1[idx(x, i, 1)], gridSize, MPI_DOUBLE, workerid, 0,
             MPI_COMM_WORLD, &status);
     }
     printf("got results from worker %d\n", workerid);
   }
-  // each work computes their maxdii and sends it to the coordinator to reduce
+  // each work computes their maxdiff and sends it to the coordinator to reduce
   printf("global maxdiff is %f\n", maxdiff);
 
   /* output the results to file "results" */
   results = fopen("results", "w");
   for (i = 1; i <= gridSize; i++) {
     for (j = 1; j <= gridSize; j++) {
-      fprintf(results, "%f ", grid[i][j]);
+      fprintf(results, "%f ", grid1[(idx(x, i, j))]);
     }
     fprintf(results, "\n");
   }
@@ -181,20 +203,22 @@ static void Coordinator(int numWorkers, int stripSize, int gridSize, double epsi
  */
 
 static void Worker(int mpiId, int numWorkers, int stripSize,
-                   int gridSize, double epsilon, double ***grid) {
+                   int gridSize, double epsilon) {
   /* the worker really only needs arrays of strip size + 2 not MAXGRID
      but since this dumb sample program does static allocation there is no way to know from
      the command line parameter what strip size will end up being so it just wastes alot of space
      a "real" program (like the one you are writing) would dynamically allocate the memory
   */
-  int i, j, iters;
+  int i, j;
   int threadId = omp_get_thread_num();
+  int numThreads = omp_get_num_threads();
   int current = 0, next = 1;   /* current and next iteration indices */
   int left = 0, right = 0;     /* neighboring strips above and below */
   int first, last;             /* first and last strip for omp */
   MPI_Status status;
-  double compDiff = 0.0, maxdiff, temp;
+  double maxdiff, temp;
   double diff;
+  int x = gridSize + 2;
 
   /* Your program should read the grid in from a file not just cram static values in like this
      wimpy sample program
@@ -203,70 +227,45 @@ static void Worker(int mpiId, int numWorkers, int stripSize,
   /* set all points to 0s, then left and right edges of grid to 1s
      first worker sets top row to 1s; last worker sets bottom row to 1s */
 
-  first = (threadId*stripSize) + 1;
-  last = (threadId+1) * stripSize;
-
-  #pragma omp single
-  {
-    if (mpiId == 1){
-      printf("-------------------------------------------------\n");
-      for (i = 0; i <= stripSize + 1; i++){
-        for (j = 0; j <= gridSize + 1; j++){
-          printf("%d ", (int)grid[0][i][j]);
-        }
-        printf("\n");
-      }
-      printf("-------------------------------------------------\n");
-    }
+  first = (threadId*(stripSize/numThreads)) + 1;
+  last = (threadId+1) * (stripSize/numThreads);
+  if (mpiId == 1){
+    printf("First: %d Last: %d\n", first, last);
   }
-
 
   /* determine neighbors */
   if (mpiId > 1)
     left = (mpiId-1);
   else
-    left=numWorkers;
+    left=0;
 
   if (mpiId < numWorkers)
     right = mpiId + 1;
   else
-    right = 1;
-
-  printf("Worker %d - Thread %d initialized; left is worker %d and right is worker %d\n",
-              mpiId, threadId, left, right);
-  maxdiff = epsilon + 1;
+    right = 0;
 
   #pragma omp single
   {
-    globalMaxDiff = DBL_MAX;
-    printf("Entering the while loop\n");
+    printf("Worker %d initialized; left is worker %d and right is worker %d\n",
+                mpiId, left, right);
+  }
+
+  // Each thread has their own maxdiff
+  // Each computer has one globalMaxDiff
+  maxdiff = epsilon + 1;
+  #pragma omp single
+  {
+    globalMaxDiff = epsilon + 1;
   }
   while (globalMaxDiff > epsilon) {
-    /* exchange my boundaries with my neighbors, in a ring */
-    printf("-----\n");
-    #pragma omp barrier
-    #pragma omp single
-    {
-      if (right != 0)
-          MPI_Send(&grid[next][stripSize][1], gridSize, MPI_DOUBLE, right, 0,
-                      MPI_COMM_WORLD);
-      if (left != 0)
-          MPI_Send(&grid[next][1][1], gridSize, MPI_DOUBLE, left, 0,
-                      MPI_COMM_WORLD);
-      if (left != 0)
-          MPI_Recv(&grid[next][0][1], gridSize, MPI_DOUBLE, left, 0,
-                      MPI_COMM_WORLD, &status);
-      if (right != 0)
-          MPI_Recv(&grid[next][stripSize+1][1], gridSize, MPI_DOUBLE, right, 0,
-                      MPI_COMM_WORLD, &status);
-    }
-    /* update my points */
+
+    // Calculate Jacobi iteration
     threadDiff[threadId] = 0;
     for (i = first; i <= last; i++) {
       for (j = 1; j <= gridSize; j++) {
-        grid[next][i][j] = (grid[current][i-1][j] + grid[current][i+1][j] +
-               grid[current][i][j-1] + grid[current][i][j+1]) / 4;
-        diff = grid[next][i][j] - grid[current][i][j];
+        grid2[idx(x, i, j)] = (grid1[idx(x, i-1, j)] + grid1[idx(x, i + 1, j)] +
+               grid1[idx(x, i, j-1)] + grid1[idx(x, i, j+1)]) * 0.25;
+        diff = grid2[idx(x, i, j)] - grid1[idx(x, i, j)];
         if (diff < 0) {
           diff = - diff;
         }
@@ -275,40 +274,53 @@ static void Worker(int mpiId, int numWorkers, int stripSize,
         }
       }
     }
+
+    // Send borders to each other
     #pragma omp barrier
     #pragma omp single
     {
-      globalMaxDiff = DBL_MIN;
+      if (right != 0)
+          MPI_Send(&grid2[idx(x, stripSize, 1)], gridSize, MPI_DOUBLE, right, 0,
+                      MPI_COMM_WORLD);
+      if (left != 0)
+          MPI_Send(&grid2[idx(x, 1, 1)], gridSize, MPI_DOUBLE, left, 0,
+                      MPI_COMM_WORLD);
+      if (left != 0)
+          MPI_Recv(&grid2[idx(x, 0, 1)], gridSize, MPI_DOUBLE, left, 0,
+                      MPI_COMM_WORLD, &status);
+      if (right != 0)
+          MPI_Recv(&grid2[idx(x, stripSize + 1, 1)], gridSize, MPI_DOUBLE, right, 0,
+                      MPI_COMM_WORLD, &status);
+    }
+
+    #pragma omp barrier
+    #pragma omp single
+    {
+      // Swap Grids
+      double* temp = grid1;
+      grid1 = grid2;
+      grid2 = temp;
+
+      // Calculate maxdiff for each computer
+      globalMaxDiff = -1;
       size_t k;
       for (k = 0; k < numWorkers; k++){
         globalMaxDiff = (threadDiff[k] > globalMaxDiff) ?
           threadDiff[k] : globalMaxDiff;
       }
-      // printf("Worker %d compDiff: %f\n", mpiId, globalMaxDiff);
-      compDiff = globalMaxDiff;
-      MPI_Allreduce(&compDiff, &maxdiff, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      // Calculate maxdiff between each computer, set to
+      // each computers globalMaxDiff
+      MPI_Allreduce(&globalMaxDiff, &maxdiff, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
       globalMaxDiff = maxdiff;
-      printf("Worker %d maxdiff: %f\n", mpiId, maxdiff);
     }
-
-    /* swap roles of grids */
-    current = next;  next = 1-next;
   }
-  #pragma omp single
-  {
-    printf("WORKER %d EXITED\n", mpiId);
-  }
-  /* send results of my current strip to the coordinator */
   #pragma omp barrier
   #pragma omp single
   {
     for (i = 1; i <= stripSize; i++) {
-        MPI_Send(&grid[current][i][1], gridSize, MPI_DOUBLE,
+        MPI_Send(&grid1[idx(x, i, 1)], gridSize, MPI_DOUBLE,
               COORDINATOR, 0, MPI_COMM_WORLD);
     }
-    printf("------------------------------------------------\n");
-    printf("WORKER %d FINISHED\n", mpiId);
-    printf("------------------------------------------------\n");
   }
 
 
