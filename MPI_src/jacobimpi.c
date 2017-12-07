@@ -41,7 +41,7 @@ int main(int argc, char *argv[]) {
   MPI_Comm_size(MPI_COMM_WORLD, &numWorkers);  /* how many processes? */
   MPI_Get_processor_name(hostname, &len);
   numWorkers--;   /* one coordinator, the other processes are workers */
-  printf("Worker %d on %s\n", mpiId, hostname);
+  // printf("Worker %d on %s\n", mpiId, hostname);
 
   /* get command-line arguments and do a simple error check */
   gridSize = atoi(argv[1]);
@@ -51,29 +51,10 @@ int main(int argc, char *argv[]) {
 
   int n;
   if (mpiId != COORDINATOR){
-    n = posix_memalign(&memptr, 16, (x) * (stripSize+2) * sizeof(double));
-    if (n != 0){
-      fprintf(stderr, "%s\n", strerror(n));
-      exit(EXIT_FAILURE);
-    }else{
-      grid1 = (double*) __builtin_assume_aligned(memptr, 16);
-    }
-
-    n = posix_memalign(&memptr, 16, (x) * (stripSize+2) * sizeof(double) + 2);
-    if (n != 0){
-      fprintf(stderr, "%s\n", strerror(n));
-      exit(EXIT_FAILURE);
-    }else{
-      grid2 = (double*) __builtin_assume_aligned(memptr, 16);
-    }
+    grid1 = malloc((x) * (stripSize+2) * sizeof(double));
+    grid2 = malloc((x) * (stripSize+2) * sizeof(double));
   }else{
-    n = posix_memalign(&memptr, 16, gridSize * gridSize * sizeof(double) + 2);
-    if (n != 0){
-      fprintf(stderr, "%s\n", strerror(n));
-      exit(EXIT_FAILURE);
-    }else{
-      grid1 = (double*) __builtin_assume_aligned(memptr, 16);
-    }
+    grid1 = malloc((gridSize+2) * (gridSize+2) * sizeof(double));
   }
 
   if (numWorkers < 2) {
@@ -126,18 +107,15 @@ int main(int argc, char *argv[]) {
     Coordinator(numWorkers, stripSize, gridSize, epsilon);
   } else {
     #pragma omp parallel for
-    for (int threadId = 0; threadId < numWorkers; threadId++) {
+    for (int threadId = 0; threadId < 4; threadId++) { ///!!!!!!!!!!!!!!!!!!!!!!
       Worker(mpiId, numWorkers, stripSize, gridSize, epsilon);
     }
   }
-  printf("BACK TO MAIN\n");
-  MPI_Barrier(MPI_COMM_WORLD);
-  printf("Worker %d freeing Grids\n", mpiId);
 
   free(grid1);
   if (mpiId != COORDINATOR)
     free(grid2);
-  printf("\n\tWorker %d Freed \n\n", mpiId);
+  printf("\nWorker %d Freed \n\n", mpiId);
   MPI_Finalize();  /* clean up MPI */
 }
 
@@ -145,8 +123,6 @@ int main(int argc, char *argv[]) {
 /* gather and print results from Workers */
 static void Coordinator(int numWorkers, int stripSize, int gridSize, double epsilon) {
 
-  // void *memptr __attribute__ ((aligned (16)));
-  // double * restrict grid __attribute__ ((aligned (16))); // place to hold the results I get from the workers
   int i, j, startrow, endrow;
   int workerid;
   MPI_Status status;
@@ -155,17 +131,8 @@ static void Coordinator(int numWorkers, int stripSize, int gridSize, double epsi
   double maxdiff = epsilon + 1;
   int x = gridSize;
 
-  // int n = posix_memalign(&memptr, 16, gridSize * gridSize * sizeof(double) + 2);
-  // if (n != 0){
-  //   fprintf(stderr, "%s\n", strerror(n));
-  //   exit(EXIT_FAILURE);
-  // }else{
-  //   grid = (double*) __builtin_assume_aligned(memptr, 16);
-  // }
-
   while (maxdiff > epsilon) {
     MPI_Allreduce(&compDiff, &maxdiff, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    // printf("\tCoordinator maxdiff: %f\n", maxdiff);
   }
 
   for (workerid = 1; workerid <= numWorkers; workerid++) {
@@ -229,9 +196,6 @@ static void Worker(int mpiId, int numWorkers, int stripSize,
 
   first = (threadId*(stripSize/numThreads)) + 1;
   last = (threadId+1) * (stripSize/numThreads);
-  if (mpiId == 1){
-    printf("First: %d Last: %d\n", first, last);
-  }
 
   /* determine neighbors */
   if (mpiId > 1)
@@ -314,6 +278,7 @@ static void Worker(int mpiId, int numWorkers, int stripSize,
       globalMaxDiff = maxdiff;
     }
   }
+
   #pragma omp barrier
   #pragma omp single
   {
@@ -322,6 +287,5 @@ static void Worker(int mpiId, int numWorkers, int stripSize,
               COORDINATOR, 0, MPI_COMM_WORLD);
     }
   }
-
 
 }
