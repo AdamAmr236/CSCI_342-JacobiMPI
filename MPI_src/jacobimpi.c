@@ -225,6 +225,8 @@ static void Worker(int mpiId, int numWorkers, int stripSize,
 
   first = (threadId*(stripSize/numThreads)) + 1;
   last = (threadId+1) * (stripSize/numThreads);
+  // if (mpiId == 1)
+  //   printf("Thread %d: (%d - %d)\n", threadId, first, last);
 
   /* determine neighbors */
   if (mpiId > 1)
@@ -250,6 +252,7 @@ static void Worker(int mpiId, int numWorkers, int stripSize,
   {
     globalMaxDiff = epsilon + 1;
   }
+
   while (globalMaxDiff > epsilon) {
 
     // Calculate Jacobi iteration
@@ -272,21 +275,27 @@ static void Worker(int mpiId, int numWorkers, int stripSize,
     #pragma omp barrier
     #pragma omp single
     {
-      if (right != 0)
-          MPI_Send(&grid2[idx(x, stripSize, 1)], gridSize, MPI_DOUBLE, right, 0,
-                      MPI_COMM_WORLD);
-      if (left != 0)
-          MPI_Send(&grid2[idx(x, 1, 1)], gridSize, MPI_DOUBLE, left, 0,
-                      MPI_COMM_WORLD);
-      if (left != 0)
-          MPI_Recv(&grid2[idx(x, 0, 1)], gridSize, MPI_DOUBLE, left, 0,
-                      MPI_COMM_WORLD, &status);
-      if (right != 0)
-          MPI_Recv(&grid2[idx(x, stripSize + 1, 1)], gridSize, MPI_DOUBLE, right, 0,
-                      MPI_COMM_WORLD, &status);
+      if (right != 0) {
+        MPI_Send(&grid2[idx(x, stripSize, 1)], gridSize, MPI_DOUBLE, right, 0,
+                  MPI_COMM_WORLD);
+      }
+
+      if (left != 0) {
+        MPI_Recv(&grid2[idx(x, 0, 1)], gridSize, MPI_DOUBLE, left, 0,
+                  MPI_COMM_WORLD, &status);
+      }
+
+      if (left != 0) {
+        MPI_Send(&grid2[idx(x, 1, 1)], gridSize, MPI_DOUBLE, left, 0,
+                  MPI_COMM_WORLD);
+      }
+
+      if (right != 0) {
+        MPI_Recv(&grid2[idx(x, stripSize + 1, 1)], gridSize, MPI_DOUBLE, right, 0,
+                  MPI_COMM_WORLD, &status);
+      }
     }
 
-    #pragma omp barrier
     #pragma omp single
     {
       // Swap Grids
