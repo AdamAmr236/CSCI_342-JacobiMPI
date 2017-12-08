@@ -122,16 +122,16 @@ int main(int argc, char *argv[]) {
    }
 
 
-  omp_set_num_threads(numWorkers);
+  omp_set_num_threads(numThreads);
   if (mpiId == COORDINATOR) {
     printf("1 Coordinator and %d Workers\n", numWorkers);
     printf("  gridSize:  %d\n  stripSize:  %d\n  epsilon:  %f\n",gridSize, stripSize, epsilon);
     Coordinator(numWorkers, stripSize, gridSize, epsilon);
   } else {
-    #pragma omp parallel for
-    for (int threadId = 0; threadId < numThreads; threadId++) { ///!!!!!!!!!!!!!!!!!!!!!!
-      Worker(mpiId, numWorkers, stripSize, gridSize, epsilon);
-    }
+    #pragma omp parallel
+    //for (int threadId = 0; threadId < numThreads; threadId++) { ///!!!!!!!!!!!!!!!!!!!!!!
+      { Worker(mpiId, numWorkers, stripSize, gridSize, epsilon); }
+    //printf("worker returning to main\n");
   }
 
   free(grid1);
@@ -146,6 +146,8 @@ int main(int argc, char *argv[]) {
     printf("Wall Clock Time: %ld.%ld\n\n",
               clockTime.tv_sec, clockTime.tv_nsec);
 
+  MPI_Barrier(MPI_COMM_WORLD);
+  //printf("Worker %d at finalize\n", mpiId);
   MPI_Finalize();  /* clean up MPI */
 }
 
@@ -296,6 +298,7 @@ static void Worker(int mpiId, int numWorkers, int stripSize,
       }
     }
 
+    //printf("Worker %d - Thread %d at barrier\n", mpiId, threadId);
     #pragma omp single
     {
       // Swap Grids
@@ -324,6 +327,7 @@ static void Worker(int mpiId, int numWorkers, int stripSize,
         MPI_Send(&grid1[idx(x, i, 1)], gridSize, MPI_DOUBLE,
               COORDINATOR, 0, MPI_COMM_WORLD);
     }
+    //printf("finished worker thread\n");
   }
 
 }
