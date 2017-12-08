@@ -3,16 +3,15 @@
   usage ()
 
     mpicc -o jacobimpi jacobimpi.c
-    mpirun -np <numWorkers+1> jacobimpi  -- <gridSize> <epsilon>   */
+    mpirun -np <numWorkers+1> jacobimpi  -- <gridSize> <numThreads> <epsilon>   */
 
 #include <stdlib.h>
 #include <mpi.h>
 #include <stdio.h>
 #include <math.h>
 #include <omp.h>
-#include <assert.h>
 #include <string.h>
-#include <mcheck.h>
+#include <time.h>
 #define MAXGRID 402     /* maximum grid size (real points plus edges) */
 #define COORDINATOR 0   /* process number of the Coordinator */
 #define MAXTHREADS 8
@@ -27,14 +26,30 @@ double globalMaxDiff;
 double * restrict grid1 __attribute__ ((aligned (16)));
 double * restrict grid2 __attribute__ ((aligned (16)));
 
+struct timespec clockStart, clockFinish;
+
+struct timespec diff(struct timespec *startTime, struct timespec *endTime)
+{
+  struct timespec temp;
+  if ((endTime->tv_nsec-startTime->tv_nsec)<0) {
+    temp.tv_sec = endTime->tv_sec - startTime->tv_sec-1;
+    temp.tv_nsec = 1000000000 + endTime->tv_nsec - startTime->tv_nsec;
+  } else {
+    temp.tv_sec = endTime->tv_sec - startTime->tv_sec;
+    temp.tv_nsec = endTime->tv_nsec - startTime->tv_nsec;
+  }
+  return temp;
+}
+
 int main(int argc, char *argv[]) {
   void *memptr __attribute__ ((aligned (16)));
-  int mpiId, len;
+  int mpiId, numThreads, len;
   int numWorkers, gridSize;  /* assume gridSize is multiple of numWorkers */
   int stripSize;             /* gridSize/numWorkers             */
   int i, j;
   double epsilon;
   char hostname[MPI_MAX_PROCESSOR_NAME];
+  clock_t start, finish;
 
   MPI_Init(&argc, &argv);
   MPI_Comm_rank(MPI_COMM_WORLD, &mpiId);  /* what is my id (rank)? */
@@ -43,11 +58,17 @@ int main(int argc, char *argv[]) {
   numWorkers--;   /* one coordinator, the other processes are workers */
   // printf("Worker %d on %s\n", mpiId, hostname);
 
+
+
   /* get command-line arguments and do a simple error check */
   gridSize = atoi(argv[1]);
   size_t x = gridSize + 2;
-  epsilon = atof(argv[2]);
+  numThreads = atoi(argv[2]);
+  epsilon = atof(argv[3]);
   stripSize = gridSize/numWorkers;
+
+  if (mpiId == COORDINATOR)
+    clock_gettime(CLOCK_REALTIME, &clockStart);
 
   int n;
   if (mpiId != COORDINATOR){
@@ -69,6 +90,7 @@ int main(int argc, char *argv[]) {
     // printf("So if you want 4 actual workers to evnly divide a gridsize of 400, tell it 5 workers so the number\n");
     // printf("of workers - 1 evenly divides the grid size. \n");
     // printf("Also the gridsize you give does NOT include the borders. \n");
+    fprintf(stderr, "gridSize not divisible by numWorkers\n");
     exit(1);
   }
   /* Note it is an SPMD model so all the processes did the same thing up to this point now
@@ -107,7 +129,7 @@ int main(int argc, char *argv[]) {
     Coordinator(numWorkers, stripSize, gridSize, epsilon);
   } else {
     #pragma omp parallel for
-    for (int threadId = 0; threadId < 4; threadId++) { ///!!!!!!!!!!!!!!!!!!!!!!
+    for (int threadId = 0; threadId < numThreads; threadId++) { ///!!!!!!!!!!!!!!!!!!!!!!
       Worker(mpiId, numWorkers, stripSize, gridSize, epsilon);
     }
   }
@@ -115,7 +137,15 @@ int main(int argc, char *argv[]) {
   free(grid1);
   if (mpiId != COORDINATOR)
     free(grid2);
-  printf("\nWorker %d Freed \n\n", mpiId);
+
+  if (mpiId == COORDINATOR)
+    clock_gettime(CLOCK_REALTIME, &clockFinish);
+
+  struct timespec clockTime = diff(&clockStart, &clockFinish);
+  if (mpiId == COORDINATOR)
+    printf("Wall Clock Time: %ld.%ld\n\n",
+              clockTime.tv_sec, clockTime.tv_nsec);
+
   MPI_Finalize();  /* clean up MPI */
 }
 
@@ -142,7 +172,6 @@ static void Coordinator(int numWorkers, int stripSize, int gridSize, double epsi
         MPI_Recv(&grid1[idx(x, i, 1)], gridSize, MPI_DOUBLE, workerid, 0,
             MPI_COMM_WORLD, &status);
     }
-    printf("got results from worker %d\n", workerid);
   }
   // each work computes their maxdiff and sends it to the coordinator to reduce
   printf("global maxdiff is %f\n", maxdiff);
@@ -208,11 +237,11 @@ static void Worker(int mpiId, int numWorkers, int stripSize,
   else
     right = 0;
 
-  #pragma omp single
-  {
-    printf("Worker %d initialized; left is worker %d and right is worker %d\n",
-                mpiId, left, right);
-  }
+  // #pragma omp single
+  // {
+  //   printf("Worker %d initialized; left is worker %d and right is worker %d\n",
+  //               mpiId, left, right);
+  // }
 
   // Each thread has their own maxdiff
   // Each computer has one globalMaxDiff
